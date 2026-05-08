@@ -61,10 +61,17 @@ WSGI_APPLICATION = 'health_core.wsgi.application'
 
 DATABASES = {
     'default': dj_database_url.config(
-        default='sqlite:///' + str(BASE_DIR / 'db.sqlite3'),
+        default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
         conn_max_age=600
     )
 }
+
+# Ensure engine is always set even if URL config fails
+if not DATABASES['default'].get('ENGINE'):
+    DATABASES['default'] = {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
+    }
 
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
