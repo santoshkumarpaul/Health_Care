@@ -1,0 +1,25 @@
+# Environments and sensitive data
+**/.env
+**/.env.*
+**/db.sqlite3
+**/secrets.py
+
+# Python
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
+env/
+venv/
+staticfiles/
+
+# Node / React
+**/node_modules/
+**/dist/
+**/build/
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.bak
