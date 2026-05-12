@@ -20,3 +20,4 @@ twilio
 # Utilities
 Pillow
 qrcode[pil]
+PyPDF2

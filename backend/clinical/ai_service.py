@@ -20,10 +20,28 @@ def get_ai_analysis(patient, vitals_list, medical_records):
         for v in vitals_list[:5]
     ]) if vitals_list else "No recent vitals."
     
-    records_str = "\n".join([
-        f"Date: {r.date}, Type: {r.record_type}, Title: {r.title}" 
-        for r in medical_records[:5]
-    ]) if medical_records else "No recent records."
+    import PyPDF2
+    from django.core.files.storage import default_storage
+
+    records_data = []
+    for r in medical_records[:5]:
+        r_text = f"Date: {r.date}, Type: {r.record_type}, Title: {r.title}"
+        if r.file:
+            try:
+                with default_storage.open(r.file.name, 'rb') as f:
+                    if r.file.name.lower().endswith('.pdf'):
+                        pdf_reader = PyPDF2.PdfReader(f)
+                        extracted_text = ""
+                        for i in range(min(2, len(pdf_reader.pages))):
+                            extracted_text += pdf_reader.pages[i].extract_text() + "\n"
+                        r_text += f"\n[Extracted PDF Content]:\n{extracted_text[:2000]}..."
+                    elif r.file.name.lower().endswith(('.png', '.jpg', '.jpeg')):
+                        r_text += f"\n[Note: This record contains an Image file ({r.file.name}).]"
+            except Exception as e:
+                print(f"--- [AI_SYSTEM] File Read Error: {e} ---")
+        records_data.append(r_text)
+        
+    records_str = "\n\n".join(records_data) if records_data else "No recent records."
 
     prompt = f"""
     Analyze this patient data and return a JSON summary and risk assessment.
@@ -41,12 +59,26 @@ def get_ai_analysis(patient, vitals_list, medical_records):
     }}
     """
 
+    # Get API Keys
+    gemini_key = os.environ.get('GEMINI_API_KEY') or getattr(settings, 'GEMINI_API_KEY', None)
+    grok_key = os.environ.get('GROK_API_KEY') or getattr(settings, 'GROK_API_KEY', None)
+    gorq_key = os.environ.get('GORQ_API_KEY') or getattr(settings, 'GORQ_API_KEY', None)
+
+    # 1. Primary Engine for Analysis: Gemini
     if gemini_key:
         # Try multiple model variants to avoid 404 errors
-        for model_name in ['gemini-1.5-flash', 'gemini-pro', 'models/gemini-1.5-flash']:
+        variants = [
+            'gemini-3.1-flash-lite', 
+            'gemini-3-flash-preview',
+            'gemini-2.5-flash-lite',
+            'gemini-1.5-flash', 
+            'gemini-pro'
+        ]
+        for model_name in variants:
             try:
-                print(f"--- [AI_SYSTEM] Attempting Gemini {model_name} ---")
+                print(f"--- [AI_SYSTEM] Analysis: Trying Gemini {model_name} ---")
                 genai.configure(api_key=gemini_key)
+                # Force v1 if possible, though library often defaults to v1beta
                 model = genai.GenerativeModel(model_name)
                 response = model.generate_content(prompt)
                 content = response.text.strip()
@@ -54,7 +86,58 @@ def get_ai_analysis(patient, vitals_list, medical_records):
                     content = content.split("```json")[1].split("```")[0].strip()
                 return json.loads(content)
             except Exception as e:
-                print(f"--- [AI_SYSTEM] Gemini {model_name} failed: {str(e)[:100]} ---")
+                print(f"--- [AI_SYSTEM] Gemini {model_name} Error: {str(e)[:100]} ---")
+
+    # 2. Fallback Engine: xAI (Grok)
+    if grok_key:
+        for model_name in ['grok-beta', 'grok-vision-beta']:
+            try:
+                print(f"--- [AI_SYSTEM] Analysis: Trying Grok {model_name} ---")
+                response = requests.post(
+                    "https://api.x.ai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {grok_key}", "Content-Type": "application/json"},
+                    json={
+                        "model": model_name, 
+                        "messages": [{"role": "system", "content": "You are a clinical analyst. Return ONLY JSON."}, {"role": "user", "content": prompt}],
+                        "temperature": 0
+                    },
+                    timeout=10
+                )
+                if response.status_code == 200:
+                    content = response.json()['choices'][0]['message']['content'].strip()
+                    if "```json" in content:
+                        content = content.split("```json")[1].split("```")[0].strip()
+                    return json.loads(content)
+                else:
+                    print(f"--- [AI_SYSTEM] Grok {model_name} Error: {response.status_code} ---")
+            except Exception as e:
+                print(f"--- [AI_SYSTEM] Grok {model_name} Error: {e} ---")
+
+    # 3. Final Fallback Engine: Groq (Since this key is known to work)
+    if gorq_key:
+        try:
+            print("--- [AI_SYSTEM] Analysis: Falling back to Groq ---")
+            response = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {gorq_key}", "Content-Type": "application/json"},
+                json={
+                    "model": "llama-3.3-70b-versatile", 
+                    "messages": [{"role": "system", "content": "You are a clinical analyst. Return ONLY JSON."}, {"role": "user", "content": prompt}],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.3
+                },
+                timeout=10
+            )
+            if response.status_code == 200:
+                content = response.json()['choices'][0]['message']['content'].strip()
+                if "```json" in content:
+                    content = content.split("```json")[1].split("```")[0].strip()
+                return json.loads(content)
+            else:
+                print(f"--- [AI_SYSTEM] Groq Analysis Error: {response.status_code} ---")
+        except Exception as e:
+            print(f"--- [AI_SYSTEM] Groq Analysis Error: {e} ---")
+
     return None
 
 def get_clinical_alerts(patients_data):
@@ -93,28 +176,29 @@ def get_chatbot_response(user_message, history=[], patient_context=None):
         messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": user_message})
 
-    # 1. Engine: Groq (Llama 3)
+    # Dedicated Chatbot Engine: Groq (Llama 3)
     if gorq_key:
         try:
-            print("--- [AI_SYSTEM] Trying Groq ---")
+            print("--- [AI_SYSTEM] Chatbot: Using Groq ---")
             response = requests.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {gorq_key}", "Content-Type": "application/json"},
-                json={"model": "llama3-8b-8192", "messages": messages, "temperature": 0.5},
+                json={"model": "llama-3.1-8b-instant", "messages": messages, "temperature": 0.5},
                 timeout=10
             )
             if response.status_code == 200:
                 return response.json()['choices'][0]['message']['content']
             else:
-                print(f"--- [AI_SYSTEM] Groq Status Code: {response.status_code} ---")
+                print(f"--- [AI_SYSTEM] Groq Chatbot Status: {response.status_code} ---")
+                print(f"--- [AI_SYSTEM] Groq Chatbot Error: {response.text[:200]} ---")
         except Exception as e:
-            print(f"--- [AI_SYSTEM] Groq Error: {e} ---")
+            print(f"--- [AI_SYSTEM] Groq Chatbot Error: {e} ---")
 
-    # 2. Engine: Gemini
+    # Fallback Chatbot Engine: Gemini
     if gemini_key:
         for model_name in ['gemini-1.5-flash', 'gemini-pro']:
             try:
-                print(f"--- [AI_SYSTEM] Trying Gemini {model_name} ---")
+                print(f"--- [AI_SYSTEM] Chatbot: Fallback to Gemini {model_name} ---")
                 genai.configure(api_key=gemini_key)
                 model = genai.GenerativeModel(model_name)
                 full_prompt = f"System: {system_prompt}\nUser: {user_message}\nAssistant:"
